@@ -657,12 +657,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         }
 
         // `stat` always follows symlinks.
-        let metadata = match FileMetadata::from_path(this, &path, true)? {
+        let metadata = match FileMetadata::from_path(this, &path, true, dest)? {
             Some(metadata) => metadata,
-            None => {
-                this.write_int(-1, dest)?;
-                return Ok(EmulateItemResult::NeedsReturn);
-            }
+            None => return Ok(EmulateItemResult::NeedsReturn),
         };
         let res = this.macos_stat_write_buf(metadata, buf_op)?;
         this.write_int(res, dest)?;
@@ -691,12 +688,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             return this.set_libc_err_and_return_neg1("EACCES", dest);
         }
 
-        let metadata = match FileMetadata::from_path(this, &path, false)? {
+        let metadata = match FileMetadata::from_path(this, &path, false, dest)? {
             Some(metadata) => metadata,
-            None => {
-                this.write_int(-1, dest)?;
-                return Ok(EmulateItemResult::NeedsReturn);
-            }
+            None => return Ok(EmulateItemResult::NeedsReturn),
         };
         let res = this.macos_stat_write_buf(metadata, buf_op)?;
         this.write_int(res, dest)?;
@@ -724,12 +718,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             return this.set_fd_not_found_and_return_neg1(dest);
         }
 
-        let metadata = match FileMetadata::from_fd(this, fd)? {
+        let metadata = match FileMetadata::from_fd(this, fd, dest)? {
             Some(metadata) => metadata,
-            None => {
-                this.write_int(-1, dest)?;
-                return Ok(EmulateItemResult::NeedsReturn);
-            }
+            None => return Ok(EmulateItemResult::NeedsReturn),
         };
         let res = this.macos_stat_write_buf(metadata, buf_op)?;
         this.write_int(res, dest)?;
@@ -814,16 +805,13 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         // If the path is empty, and the AT_EMPTY_PATH flag is set, we query the open file
         // represented by dirfd, whether it's a directory or otherwise.
         let metadata = if path.as_os_str().is_empty() && empty_path_flag {
-            FileMetadata::from_fd(this, dirfd)?
+            FileMetadata::from_fd(this, dirfd, dest)?
         } else {
-            FileMetadata::from_path(this, &path, follow_symlink)?
+            FileMetadata::from_path(this, &path, follow_symlink, dest)?
         };
         let metadata = match metadata {
             Some(metadata) => metadata,
-            None => {
-                this.write_int(-1, dest)?;
-                return Ok(EmulateItemResult::NeedsReturn);
-            }
+            None => return Ok(EmulateItemResult::NeedsReturn),
         };
 
         // The `mode` field specifies the type of the file and the permissions over the file for
@@ -1712,19 +1700,22 @@ impl FileMetadata {
         ecx: &mut MiriInterpCx<'tcx>,
         path: &Path,
         follow_symlink: bool,
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, Option<FileMetadata>> {
         let metadata =
             if follow_symlink { std::fs::metadata(path) } else { std::fs::symlink_metadata(path) };
 
-        FileMetadata::from_meta(ecx, metadata)
+        FileMetadata::from_meta(ecx, metadata, dest)
     }
 
     fn from_fd<'tcx>(
         ecx: &mut MiriInterpCx<'tcx>,
         fd: i32,
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, Option<FileMetadata>> {
         let Some(file_description) = ecx.machine.fds.get(fd) else {
-            return ecx.fd_not_found().map(|_: i32| None);
+            ecx.set_fd_not_found_and_return_neg1(dest)?;
+            return Ok(None);
         };
 
         let file = &file_description
@@ -1738,17 +1729,18 @@ impl FileMetadata {
 
         let metadata = file.metadata();
         drop(file_description);
-        FileMetadata::from_meta(ecx, metadata)
+        FileMetadata::from_meta(ecx, metadata, dest)
     }
 
     fn from_meta<'tcx>(
         ecx: &mut MiriInterpCx<'tcx>,
         metadata: Result<std::fs::Metadata, std::io::Error>,
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, Option<FileMetadata>> {
         let metadata = match metadata {
             Ok(metadata) => metadata,
             Err(e) => {
-                ecx.set_last_error_from_io_error(e)?;
+                ecx.set_io_err_and_return_neg1(e, dest)?;
                 return Ok(None);
             }
         };
