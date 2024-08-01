@@ -811,8 +811,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 }
                 // This function looks and behaves excatly like miri_start_unwind.
                 let [payload] = this.check_shim(abi, Abi::C { unwind: true }, link_name, args)?;
-                this.handle_miri_start_unwind(payload)?;
-                return Ok(EmulateItemResult::NeedsUnwind);
+                return this.handle_miri_start_unwind(payload);
             }
 
             // Incomplete shims that we "stub out" just to get pre-main initialization code to work.
