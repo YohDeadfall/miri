@@ -639,7 +639,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         path_op: &OpTy<'tcx>,
         buf_op: &OpTy<'tcx>,
-    ) -> InterpResult<'tcx, Scalar> {
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         if !matches!(&*this.tcx.sess.target.os, "macos" | "freebsd") {
@@ -652,18 +653,20 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         // Reject if isolation is enabled.
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
             this.reject_in_isolation("`stat`", reject_with)?;
-            let eacc = this.eval_libc("EACCES");
-            this.set_last_error(eacc)?;
-            return Ok(Scalar::from_i32(-1));
+            return this.set_libc_err_and_return_neg1("EACCES", dest);
         }
 
         // `stat` always follows symlinks.
         let metadata = match FileMetadata::from_path(this, &path, true)? {
             Some(metadata) => metadata,
-            None => return Ok(Scalar::from_i32(-1)), // `FileMetadata` has set errno
+            None => {
+                this.write_int(-1, dest)?;
+                return Ok(EmulateItemResult::NeedsReturn);
+            }
         };
-
-        Ok(Scalar::from_i32(this.macos_stat_write_buf(metadata, buf_op)?))
+        let res = this.macos_stat_write_buf(metadata, buf_op)?;
+        this.write_int(res, dest)?;
+        Ok(EmulateItemResult::NeedsReturn)
     }
 
     // `lstat` is used to get symlink metadata.
@@ -671,7 +674,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         path_op: &OpTy<'tcx>,
         buf_op: &OpTy<'tcx>,
-    ) -> InterpResult<'tcx, Scalar> {
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         if !matches!(&*this.tcx.sess.target.os, "macos" | "freebsd") {
@@ -684,24 +688,27 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         // Reject if isolation is enabled.
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
             this.reject_in_isolation("`lstat`", reject_with)?;
-            let eacc = this.eval_libc("EACCES");
-            this.set_last_error(eacc)?;
-            return Ok(Scalar::from_i32(-1));
+            return this.set_libc_err_and_return_neg1("EACCES", dest);
         }
 
         let metadata = match FileMetadata::from_path(this, &path, false)? {
             Some(metadata) => metadata,
-            None => return Ok(Scalar::from_i32(-1)), // `FileMetadata` has set errno
+            None => {
+                this.write_int(-1, dest)?;
+                return Ok(EmulateItemResult::NeedsReturn);
+            }
         };
-
-        Ok(Scalar::from_i32(this.macos_stat_write_buf(metadata, buf_op)?))
+        let res = this.macos_stat_write_buf(metadata, buf_op)?;
+        this.write_int(res, dest)?;
+        Ok(EmulateItemResult::NeedsReturn)
     }
 
     fn macos_fbsd_fstat(
         &mut self,
         fd_op: &OpTy<'tcx>,
         buf_op: &OpTy<'tcx>,
-    ) -> InterpResult<'tcx, Scalar> {
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         if !matches!(&*this.tcx.sess.target.os, "macos" | "freebsd") {
@@ -714,14 +721,19 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
             this.reject_in_isolation("`fstat`", reject_with)?;
             // Set error code as "EBADF" (bad fd)
-            return Ok(Scalar::from_i32(this.fd_not_found()?));
+            return this.set_fd_not_found_and_return_neg1(dest);
         }
 
         let metadata = match FileMetadata::from_fd(this, fd)? {
             Some(metadata) => metadata,
-            None => return Ok(Scalar::from_i32(-1)),
+            None => {
+                this.write_int(-1, dest)?;
+                return Ok(EmulateItemResult::NeedsReturn);
+            }
         };
-        Ok(Scalar::from_i32(this.macos_stat_write_buf(metadata, buf_op)?))
+        let res = this.macos_stat_write_buf(metadata, buf_op)?;
+        this.write_int(res, dest)?;
+        Ok(EmulateItemResult::NeedsReturn)
     }
 
     fn linux_statx(
@@ -1129,7 +1141,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         dirp_op: &OpTy<'tcx>,
         entry_op: &OpTy<'tcx>,
         result_op: &OpTy<'tcx>,
-    ) -> InterpResult<'tcx, Scalar> {
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         if !matches!(&*this.tcx.sess.target.os, "macos" | "freebsd") {
@@ -1141,14 +1154,17 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         // Reject if isolation is enabled.
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
             this.reject_in_isolation("`readdir_r`", reject_with)?;
-            // Set error code as "EBADF" (bad fd)
-            return Ok(Scalar::from_i32(this.fd_not_found()?));
+            // TODO: why does this set the global error code and returns -1?
+            // at the end of this function we don't set the code, we just return it.
+            let i: i32 = this.fd_not_found()?;
+            this.write_int(i, dest)?;
+            return Ok(EmulateItemResult::NeedsReturn);
         }
 
         let open_dir = this.machine.dirs.streams.get_mut(&dirp).ok_or_else(|| {
             err_unsup_format!("the DIR pointer passed to readdir_r did not come from opendir")
         })?;
-        Ok(Scalar::from_i32(match open_dir.read_dir.next() {
+        match open_dir.read_dir.next() {
             Some(Ok(dir_entry)) => {
                 // Write into entry, write pointer to result, return 0 on success.
                 // The name is written with write_os_str_to_c_str, while the rest of the
@@ -1225,18 +1241,17 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
                 let result_place = this.deref_pointer(result_op)?;
                 this.write_scalar(this.read_scalar(entry_op)?, &result_place)?;
-
-                0
+                this.write_null(dest)?;
             }
             None => {
                 // end of stream: return 0, assign *result=NULL
                 this.write_null(&this.deref_pointer(result_op)?)?;
-                0
+                this.write_null(dest)?;
             }
             Some(Err(e)) =>
                 match e.raw_os_error() {
                     // return positive error number on error
-                    Some(error) => error,
+                    Some(error) => this.write_int(error, dest)?,
                     None => {
                         throw_unsup_format!(
                             "the error {} couldn't be converted to a return value",
@@ -1244,7 +1259,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                         )
                     }
                 },
-        }))
+        }
+
+        Ok(EmulateItemResult::NeedsReturn)
     }
 
     fn closedir(&mut self, dirp_op: &OpTy<'tcx>) -> InterpResult<'tcx, Scalar> {
