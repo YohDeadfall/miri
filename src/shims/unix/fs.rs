@@ -731,7 +731,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         flags_op: &OpTy<'tcx>,    // Should be an `int`
         mask_op: &OpTy<'tcx>,     // Should be an `unsigned int`
         statxbuf_op: &OpTy<'tcx>, // Should be a `struct statx *`
-    ) -> InterpResult<'tcx, Scalar> {
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         this.assert_target_os("linux", "statx");
@@ -746,7 +747,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         if this.ptr_is_null(statxbuf_ptr)? || this.ptr_is_null(pathname_ptr)? {
             let efault = this.eval_libc("EFAULT");
             this.set_last_error(efault)?;
-            return Ok(Scalar::from_i32(-1));
+            this.write_int(-1, dest)?;
+            return Ok(EmulateItemResult::NeedsReturn);
         }
 
         let statxbuf = this.deref_pointer_as(statxbuf_op, this.libc_ty_layout("statx"))?;
@@ -788,7 +790,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 this.eval_libc("EBADF")
             };
             this.set_last_error(ecode)?;
-            return Ok(Scalar::from_i32(-1));
+            this.write_int(-1, dest)?;
+            return Ok(EmulateItemResult::NeedsReturn);
         }
 
         // the `_mask_op` parameter specifies the file information that the caller requested.
@@ -810,7 +813,10 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         };
         let metadata = match metadata {
             Some(metadata) => metadata,
-            None => return Ok(Scalar::from_i32(-1)),
+            None => {
+                this.write_int(-1, dest)?;
+                return Ok(EmulateItemResult::NeedsReturn);
+            }
         };
 
         // The `mode` field specifies the type of the file and the permissions over the file for
@@ -903,7 +909,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             &this.project_field_named(&statxbuf, "stx_mtime")?,
         )?;
 
-        Ok(Scalar::from_i32(0))
+        this.write_null(dest)?;
+        Ok(EmulateItemResult::NeedsReturn)
     }
 
     fn rename(
